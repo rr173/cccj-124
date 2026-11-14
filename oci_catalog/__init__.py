@@ -32,6 +32,18 @@ from .queries import (
     query_tag_history,
     split_namespace,
 )
+from .sbom import (
+    Diagnostic,
+    ImportResult,
+    ParsedDocument,
+    Purl,
+    PurlError,
+    SBOMStore,
+    parse_document,
+    parse_purl,
+    query_component_images,
+    query_image_components,
+)
 from .store import CatalogStore
 
 __all__ = [
@@ -45,4 +57,8 @@ __all__ = [
     "TagEventType",
     "diff_namespace_scans", "latest_completed_scans",
     "query_platform_references", "query_tag_history", "split_namespace",
+    # SBOM 子系统
+    "Purl", "PurlError", "parse_purl", "Diagnostic", "ParsedDocument",
+    "parse_document", "SBOMStore", "ImportResult",
+    "query_image_components", "query_component_images",
 ]

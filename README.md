@@ -17,9 +17,18 @@ oci_catalog/
 ├── client.py          # OCI Distribution 只读 HTTP 客户端（无 blob 方法）
 ├── store.py           # SQLite 持久化：内容身份/事件/检查点/隔离/快照
 ├── collector.py       # 采集编排：递归展开、事件判定、事务、隔离、续办
-└── queries.py         # 三类治理查询
-tests/                 # 26 个 unittest 用例（无第三方依赖）
-smoke_demo.py          # 端到端冒烟演示
+├── queries.py         # 三类治理查询
+└── sbom/              # 离线 SBOM 接入与依赖血缘查询（独立 SQLite 库）
+    ├── purl.py            # Package URL 解析/规范化（generic/pypi/npm）
+    ├── sbom_parser.py     # CycloneDX/SPDX 解析与数据契约诊断
+    ├── sbom_store.py      # 镜像绑定校验、单文件事务、幂等导入
+    ├── sbom_queries.py    # 镜像导出 + 组件反查（菱形/环安全最短路径）
+    ├── sbom_cli.py        # 批量导入/查询入口（python3 -m ...）
+    └── sample_data.py     # 可重建的关联供应商清单样例
+tests/                 # 91 个 unittest 用例（无第三方依赖）
+smoke_demo.py          # 目录采集端到端冒烟演示
+run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
+verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
 ```
 
 ## 核心语义
@@ -106,6 +115,80 @@ python3 -I smoke_demo.py
 | namespace 两次扫描对比 | `test_diff_*`（3 个） |
 | 鉴权协商与 scope 强制 | `test_auth.py`（4 个） |
 | 不下载 layer / 子 manifest GC 容错 | `test_layers_are_never_downloaded`、`test_garbage_collected_index_child_is_tolerated` |
+
+## 离线 SBOM 接入与依赖血缘（`oci_catalog.sbom`）
+
+在目录采集之上，把供应商随镜像提供的 CycloneDX/SPDX 软件物料清单加工成统一的
+组件明细与依赖关系，并从目录库带出平台上下文。**只做清单数据加工**：不做漏洞
+检测、不访问网络；目录库以只读方式打开，接入清单不产生任何 tag 事件，SBOM
+数据落在独立 SQLite 库。
+
+### 数据契约
+
+| 维度 | CycloneDX JSON | SPDX JSON |
+|---|---|---|
+| 文件内身份 | 组件 `bom-ref`（含嵌套 `components`，全文档唯一） | 包 `SPDXID`（全文档唯一） |
+| 节点来源 | 递归 `components`，记录 JSONPath 位置 | `packages`，记录 JSONPath 位置 |
+| 坐标 | 组件 `purl` 字段 | `externalRefs` 中 `referenceType=purl`（多 purl 报错） |
+| 依赖边 | `dependencies`：`ref -> dependsOn[]` | 仅 `DEPENDS_ON`/`DEPENDENCY_OF` 转同方向边；其余关系忽略并计数 |
+| 悬空引用 | 边端点不是已声明 bom-ref → 诊断 | 关系端点不是已声明 SPDXID → 诊断 |
+
+* 组件名、版本、供应者、**许可证原始表达**（不做 SPDX 表达式归一）与源文件
+  位置全部随出现记录保留，可查回原资料。
+* 不靠显示名连接节点；**不同文件即使复用相同引用名也互不相干**——跨文件
+  合并只发生在 purl 坐标上，且每个文件内身份（bom-ref/SPDXID）的出现记录
+  与依赖边独立保留。
+* 非法 purl、文件内重复引用、依赖指向不存在引用，都产出带**文件 + JSONPath
+  位置**的诊断；任何诊断都会让整份文件被拒绝。
+
+### purl 归一化（可合并坐标）
+
+* 支持类型：`generic`、`pypi`、`npm`（类型大小写归一，其他类型拒绝）；
+* PyPI 按 PEP 503 归一：`[-_.]+` 连续组合 → 单个连字符并转小写
+  （`Flask_Core.Ext` 与 `flask-core-ext` 是同一身份）；
+* npm scope 转小写、包名本体保留大小写；带百分号编码的名称先解码再规范编码；
+* qualifier 键排序、值做规范百分号编码；版本、qualifier、subpath 都参与身份
+  区分——同名不同版本、不同 qualifiers、npm 不同 scope 不会误合并；
+* 无 purl 的组件 `component_id` 为空，只保留文件内身份，**不从名称/版本臆造
+  全局身份**。
+
+### 存储、绑定与事务
+
+* 绑定目标由调用者显式提供，必须是目录中已收录的**单平台 image manifest**；
+  tag、index digest、unknown manifest、未收录摘要分别以
+  `binding_not_digest`/`binding_not_image`/`binding_unknown_digest` 拒绝。
+* 每个文件一个事务：失败时不写任何 components/occurrences/edges，只在
+  `import_failures` 留诊断，失败文件不可能被查询成完整清单；逐文件独立成败。
+* 重复文件语义：同 `source_path` 重导 → `replaced`（级联替换，不留修订流）；
+  不同路径但内容 sha256 与绑定相同 → `duplicate_skipped`；同内容绑定不同
+  镜像 → 独立文件 `imported`。
+
+### 两类查询
+
+| 函数 / 子命令 | 行为 |
+|---|---|
+| `query_image_components` / `image --digest` | 按镜像 digest 逐份来源清单导出组件出现明细、归一化 purl、源位置与**直接依赖**，并带出平台上下文 |
+| `query_component_images` / `component --purl` | 按 purl 反查包含该组件的镜像；**每份清单分别**给出从根到该组件的最短依赖路径 |
+
+路径按 `file_id` 严格分组，**绝不跨来源清单拼边**。图允许菱形与环：BFS 距离
+保证查询必然终止，环不使清单失效；多条同长路径按文件内引用名字典序稳定选择；
+与根不连通的环岛屿以分量内最小引用名为锚点并标注 `anchor_note`。
+
+### 运行
+
+```bash
+# 全部测试（91 个，纯标准库；含原 26 个目录采集回归）
+python3 -I -m unittest discover -s tests -p 'test_*.py' -v
+
+# SBOM 端到端演示：关联供应商清单 + 新进程显式验收（期待集合/路径手写列出）
+python3 -I run_sbom_demo.py
+
+# 命令行入口
+python3 -m oci_catalog.sbom.sbom_cli import --catalog catalog.db --sbom sbom.db \
+    --bind vendor-a.cdx.json=sha256:aaaa... --bind vendor-b.spdx.json=sha256:bbbb...
+python3 -m oci_catalog.sbom.sbom_cli image    --catalog ... --sbom ... --digest sha256:...
+python3 -m oci_catalog.sbom.sbom_cli component --catalog ... --sbom ... --purl 'pkg:pypi/requests@2.32.3'
+```
 
 ## 设计取舍
 
