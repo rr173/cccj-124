@@ -41,7 +41,17 @@ oci_catalog/relational/ # 离线关系加工：声明式计划 -> 业务结果 +
     ├── relational_cli.py    # 命令行入口（python3 -m ...）
     ├── sample_relational.py # 可重建的关系加工演示数据与计划
     └── README.md            # 计划格式与运行方式详述
-tests/                 # 265 个 unittest 用例（无第三方依赖）
+oci_catalog/provenance/ # 离线构建证明：DSSE 信封 + in-toto/SLSA 声明 + 本地信任策略（独立 SQLite 库）
+    ├── jsonutil.py          # 严格 JSON（重复键带 JSONPath 拒绝）
+    ├── dsse.py              # DSSE 信封解析、PAE、Ed25519 验签（cryptography）
+    ├── intoto.py            # in-toto Statement v1 / SLSA Provenance v1 解析
+    ├── policy.py            # 本地信任策略：公钥登记 + 授权规则 + 门槛校验
+    ├── store.py             # 独立 SQLite 证据库、绑定校验、幂等导入
+    ├── queries.py           # 证据评价（即时验签计票）与镜像/材料两类查询
+    ├── provenance_cli.py    # 命令行入口（python3 -m ...）
+    ├── sample_data.py       # 可重建的三对测试密钥/信封/策略样例
+    └── README.md            # 字段边界、策略例子、失败与未信任的区别、限制
+tests/                 # 359 个 unittest 用例（目录/SBOM/文件视图/关系为纯标准库；证明子系统需 cryptography）
 smoke_demo.py          # 目录采集端到端冒烟演示
 run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
 verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
@@ -49,6 +59,8 @@ run_fileview_demo.py   # 文件视图全流程演示（多层归档 + 新进程�
 verify_fileview_demo.py# 被 run_fileview_demo 以新进程启动的验收脚本
 run_relational_demo.py # 关系加工全流程演示（声明式计划 + 新进程手写验收）
 verify_relational_demo.py # 被 run_relational_demo 以新进程启动的验收脚本
+run_provenance_demo.py # 构建证明全流程演示（导入/换策略/新进程验收）
+verify_provenance_demo.py # 被 run_provenance_demo 以新进程启动的验收脚本
 ```
 
 ## 核心语义
@@ -114,7 +126,7 @@ sha256 比对；不符立即抛 `DigestMismatch`。采集器在 **repository 单
 ## 运行
 
 ```bash
-# 全部测试（265 个，纯标准库）
+# 全部测试（359 个；目录采集纯标准库，证明子系统需 cryptography）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 端到端演示（鉴权 + 多平台 + 改指向/删除 + 三类查询）
@@ -197,7 +209,7 @@ python3 -I smoke_demo.py
 ### 运行
 
 ```bash
-# 全部测试（265 个，纯标准库；含目录采集回归）
+# 全部测试（359 个；含目录采集回归，证明子系统需 cryptography）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # SBOM 端到端演示：关联供应商清单 + 新进程显式验收（期待集合/路径手写列出）
@@ -265,7 +277,7 @@ SBOM 库与视图库互不混写。
 | `layers` / `failures` | 查看构建层序 / 失败诊断 |
 
 ```bash
-# 全部测试（265 个，纯标准库；含目录采集与 SBOM 回归）
+# 全部测试（359 个；含目录采集与 SBOM 回归，证明子系统需 cryptography）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 文件视图端到端演示：两平台目录 + 三层归档合成 + 新进程手写验收
@@ -320,7 +332,7 @@ JSON 客户归属、一对多费用表）接成可查询的关系结果。交付
 ### 运行
 
 ```bash
-# 全部测试（265 个，纯标准库；含目录采集/SBOM/文件视图回归）
+# 全部测试（359 个；含目录采集/SBOM/文件视图回归，证明子系统需 cryptography）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 关系加工端到端演示（含新进程手写期待值验收）
@@ -333,6 +345,58 @@ python3 -m oci_catalog.relational.relational_cli --output results.db \
     trace --run 1 --node region_summary --row-id 32
 python3 -m oci_catalog.relational.relational_cli --output results.db \
     export --run 1 --node region_summary > summary.csv
+```
+
+## 离线构建证明接入（`oci_catalog.provenance`）
+
+供应商随镜像交来“这份镜像由哪个构建任务、用了哪些输入材料生成”的签名
+声明（DSSE 信封 + in-toto/SLSA provenance）。交付人员把信封绑定到一个
+精确的 image digest，原始证据落独立 SQLite 库；再选择一份**本地信任
+策略**，得到已核验的构建者、构建任务与输入材料明细。**全程本地**：不
+连接透明日志、证书服务或 registry；Ed25519 验签全部委托 `cryptography`
+库（唯一第三方依赖，且只有本子系统需要），不自行实现密码算法。字段
+边界、策略格式与限制的完整说明见 `oci_catalog/provenance/README.md`。
+
+### 语义要点
+
+* **绑定只认摘要**：声明的 subject 中必须存在 sha256 与所绑定单平台
+  image digest 相同的项（可在非首项）；不按 name/tag 猜测，index 与
+  未收录摘要拒绝；
+* **对原始字节验签**：验签数据是 PAE（`DSSEv1` + 长度前缀），对
+  base64 解码后的原始 payload 验签，绝不重序列化 JSON；信封/payload/
+  策略中的重复 JSON 键带位置拒绝；base64 接受标准与 URL 安全编码；
+* **策略不是信封自述**：策略登记 Ed25519 公钥与规则（唯一 ID、精确
+  匹配 builder.id/buildType、授权公钥集合、正整数门槛）；规则冲突、
+  未知公钥、门槛超过独立公钥数都在处理证据前报错；
+* **计票按公钥字节**：同一公钥的多个别名、重复签名都只算一票；keyid
+  只作提示，签名者由实际验签确定；票数只在同一信封的同一原始载荷内
+  累计；坏签名/未知签名者留诊断但不阻断达到门槛的信封通过；
+* **证据与可信投影分离**：结构合法但暂不被信任的证据照常保留，查询
+  明确区分未达门槛/无匹配规则/签名不成立；换策略重新评价已保存的
+  原始证据即可，不沿用旧通过标志；每次评价记录策略内容摘要与结论；
+* **结论的限制**：`trusted` 只表示获授权密钥签过这份绑定声明，不
+  证明镜像确实按声明执行过构建。
+
+### 运行
+
+```bash
+# 全部测试（359 个；证明子系统需要 cryptography，缺失时其用例自动跳过）
+.venv/bin/python -I -m unittest discover -s tests -p 'test_*.py' -v
+
+# 构建证明端到端演示：三对测试密钥 + 换策略重评价 + 新进程手写验收
+.venv/bin/python -I run_provenance_demo.py
+
+# 命令行入口
+python3 -m oci_catalog.provenance.provenance_cli import \\
+    --catalog catalog.db --prov provenance.db \\
+    --bind ./image-amd64.intoto.json=sha256:aaaa...
+python3 -m oci_catalog.provenance.provenance_cli verify \\
+    --catalog ... --prov ... --policy policy.json
+python3 -m oci_catalog.provenance.provenance_cli image \\
+    --catalog ... --prov ... --policy policy.json --digest sha256:...
+python3 -m oci_catalog.provenance.provenance_cli material \\
+    --catalog ... --prov ... --policy policy.json \\
+    --uri https://mirror.example/dataset.tar.gz --sha256 <64hex>
 ```
 
 ## 设计取舍

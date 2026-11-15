@@ -65,6 +65,18 @@ from .relational import (
     open_result_store,
     run_plan,
 )
+from .provenance import (
+    Evaluation,
+    ImportResult as ProvenanceImportResult,
+    Policy,
+    PolicyError,
+    ProvenanceStore,
+    evaluate_evidence,
+    key_fingerprint,
+    load_policy,
+    query_image_provenance,
+    query_material_images,
+)
 
 __all__ = [
     "RegistryClient", "Collector", "CatalogStore",
@@ -88,4 +100,8 @@ __all__ = [
     # 离线关系加工子系统
     "run_plan", "open_result_store", "RunOutcome", "RelationalStore",
     "PlanError", "SourceReadError",
+    # 离线构建证明子系统
+    "ProvenanceStore", "ProvenanceImportResult", "Policy", "PolicyError",
+    "load_policy", "key_fingerprint", "evaluate_evidence", "Evaluation",
+    "query_image_provenance", "query_material_images",
 ]
