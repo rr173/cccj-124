@@ -58,7 +58,15 @@ oci_catalog/vuln/      # 离线公告关联：本地 OSV 风格公告 × 已导�
     ├── vuln_cli.py          # 命令行入口（python3 -m ...）
     ├── sample_data.py       # 可重建的两平台 SBOM + 人工公告样例
     └── README.md            # 本次接受的公告子集、区间语义、状态机与限制
-tests/                 # 454 个 unittest 用例（目录/SBOM/文件视图/关系为纯标准库；证明子系统需 cryptography，公告关联需 packaging+semantic_version）
+oci_catalog/blobstore/ # 本机共享 OCI 原始对象仓：闭包导入、命名保留、固定读者、两阶段回收
+    ├── layout.py            # 严格 JSON、OCI 描述符/layout 解析（接收边界）
+    ├── locking.py           # 发布锁、读者保护锁、进程身份（flock）
+    ├── store.py             # 独立 SQLite 元数据 + 原始对象文件、导入/命名/读取/回收
+    ├── queries.py           # 名称与闭包查询、对象字节导出（固定读者上下文内）
+    ├── blobstore_cli.py     # 命令行入口（python3 -m ...）
+    ├── sample_data.py       # 可重建的真实字节 OCI Image Layout 样例
+    └── README.md            # 存储布局、引用/读取生命周期、回收清单、异常退出恢复
+tests/                 # unittest 用例（目录/SBOM/文件视图/关系/对象仓为纯标准库；证明子系统需 cryptography，公告关联需 packaging+semantic_version）
 smoke_demo.py          # 目录采集端到端冒烟演示
 run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
 verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
@@ -70,6 +78,8 @@ run_provenance_demo.py # 构建证明全流程演示（导入/换策略/新进�
 verify_provenance_demo.py # 被 run_provenance_demo 以新进程启动的验收脚本
 run_vuln_demo.py       # 公告关联全流程演示（命令行报告 + 另一进程按别名查询 + 新进程验收）
 verify_vuln_demo.py    # 被 run_vuln_demo 以新进程启动的验收脚本（期待值手写为常量表）
+run_blobstore_demo.py  # OCI 原始对象仓全流程演示（真实字节布局 + 腾盘/并发/崩溃恢复）
+verify_blobstore_demo.py # 被 run_blobstore_demo 以新进程启动的验收脚本（人工常量表）
 ```
 
 ## 依赖安装
@@ -476,6 +486,62 @@ python3 -m oci_catalog.vuln.vuln_cli report \\
 python3 -m oci_catalog.vuln.vuln_cli advisory \\
     --catalog ... --sbom ... --advisories ... \\
     --digest sha256:aaaa... --id VULN-CCCC
+```
+
+## 本机共享 OCI 原始对象仓（`oci_catalog.blobstore`）
+
+离线机房多个交付批次共用大层，删名称不能直接删层、别的进程可能仍在读。
+本子系统提供本机共享的原始对象仓：把本地 OCI Image Layout 的**根闭包**
+纳入仓、用可替换的名称保留、以固定读者上下文分块读取，并按“计划 → 显式
+应用”两阶段回收实际字节。元数据独立 SQLite，对象按摘要存普通文件，仓
+自有字节副本（输入目录移走仍可读）。**不运行镜像、不联网、不合成 tar 文件
+树、不分析软件清单**，也不读写其他既有库。详见
+`oci_catalog/blobstore/README.md`。
+
+### 语义要点
+
+* **接收边界**：一次导入一个 layout + 一个根 sha256；接受 OCI image
+  manifest 或递归 index，沿描述符走完根/子 manifest/config/layer 闭包；
+  manifest 保持原字节，config/layer 当不透明字节；只收合法 sha256 与非负
+  整数 size，按实际字节核对长度与摘要；拒绝缺失对象、坏长度/摘要、不支持
+  的 manifest 类型、重复 JSON 键与同摘要矛盾描述；对象路径只由 digest 生成。
+* **按唯一对象计账**：多名称、多根、同一根多条边共享的对象只按实际长度
+  计一次；名称替换/删除不改字节，删除名称不 unlink 对象。
+* **读取生命周期**：`open_reader(name)` 固定名称当时的根并返回描述符与
+  分块读取能力；只能读固定闭包内对象，直到关闭都受保护。名称后改指向或
+  删除，旧读者仍取原字节，新读者按最新名称。长读不持全局发布锁，其他进程
+  仍可发布、规划、回收。
+* **两阶段回收**：`plan_gc()` 冻结候选清单（不可达完整对象、各自 size 与
+  唯一字节总数）；`apply_gc(plan_id)` 逐项复核当前引用与活跃读者，后来受
+  保护的项跳过并说明原因，其余照删；只处理清单内对象；重复应用如实区分
+  `deleted`/`already_deleted`/`skipped`。引用或活跃读者闭包缺损时先报仓库
+  状态异常，不得当成无引用。
+* **真实进程退出**：正常关闭立即解除保护；被强杀的读者由内核释放 flock，
+  下一次回收辨认并释放，不要求人工删 pin、也不按固定秒数判死慢读者。字节
+  移动与元数据提交的边界保证名称永不指向半份内容；崩溃残留的未发布暂存可
+  回收、孤儿字节进入候选，恢复手段就是锁语义 + 单事务 + 显式命令，不引入
+  修订流/后台队列/守护进程。
+* **强杀读者与并发回收**：两个回收者同时应用有交集清单时，发布锁串行化，
+  每个候选恰好删除一次。
+
+### 运行
+
+```bash
+# 对象仓回归（纯标准库）
+python3 -I -m unittest discover -s tests -p 'test_blobstore_*.py' -v
+
+# 端到端演示：真实字节嵌套索引/两平台/共享层 + 移走输入目录后读取 +
+# 固定读者期间回收 + 屏障/并发/三种异常退出 + 新进程人工常量表验收
+python3 -I run_blobstore_demo.py
+
+# 命令行入口
+python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs import \
+    --layout /incoming/delivery-a --root sha256:aaaa... --name delivery-a
+python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs \
+    export --name delivery-a --digest sha256:1111... --output ./layer.bin
+python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs gc plan
+python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs \
+    gc apply --plan <plan_id>
 ```
 
 ## 设计取舍
