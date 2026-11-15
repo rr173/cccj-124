@@ -1,0 +1,56 @@
+{
+  "inputs": [
+    {
+      "name": "orders",
+      "format": "csv",
+      "files": [
+        {"image": "sha256:REPLACE_WITH_ORDERS_IMAGE_DIGEST",
+         "path": "/data/orders/dt=2026-11-01/orders.csv"},
+        {"image": "sha256:REPLACE_WITH_ORDERS_IMAGE_DIGEST",
+         "path": "/data/orders/dt=2026-11-02/orders.csv"}
+      ],
+      "contract": {
+        "missing": "reject",
+        "empty_string": "null",
+        "extra_fields": "reject",
+        "fields": [
+          {"name": "order_id", "type": "string", "nullable": false},
+          {"name": "cust_id", "type": "string", "nullable": true},
+          {"name": "amount", "type": "decimal", "nullable": false},
+          {"name": "status", "type": "string", "nullable": false},
+          {"name": "qty", "type": "integer", "nullable": false}
+        ]
+      }
+    },
+    {
+      "name": "customers",
+      "format": "jsonl",
+      "files": [
+        {"image": "sha256:REPLACE_WITH_CUSTOMERS_IMAGE_DIGEST",
+         "path": "/data/customers/customers.jsonl"}
+      ],
+      "contract": {
+        "missing": "reject",
+        "empty_string": "null",
+        "extra_fields": "reject",
+        "fields": [
+          {"name": "cust_id", "type": "string", "nullable": false},
+          {"name": "region", "type": "string", "nullable": true}
+        ]
+      }
+    }
+  ],
+  "nodes": [
+    {"name": "orders_src", "kind": "source", "input": "orders"},
+    {"name": "customers_src", "kind": "source", "input": "customers"},
+    {"name": "active_orders", "kind": "filter", "input": "orders_src",
+     "expression": "status = 'active'"},
+    {"name": "with_customer", "kind": "join",
+     "left": "active_orders", "right": "customers_src",
+     "join_type": "left", "left_key": "cust_id", "right_key": "cust_id",
+     "left_suffix": "_o", "right_suffix": "_c"},
+    {"name": "region_summary", "kind": "group", "input": "with_customer",
+     "keys": ["region"], "count_alias": "order_count",
+     "sum_column": "amount", "sum_alias": "amount_total"}
+  ]
+}

@@ -57,6 +57,14 @@ from .fileview import (
     read_file_bytes,
     stat_path,
 )
+from .relational import (
+    PlanError,
+    RelationalStore,
+    RunOutcome,
+    SourceReadError,
+    open_result_store,
+    run_plan,
+)
 
 __all__ = [
     "RegistryClient", "Collector", "CatalogStore",
@@ -77,4 +85,7 @@ __all__ = [
     "FileViewStore", "BuildResult", "TreeMerge", "LayerIngestError",
     "ViewDiagnostic", "ViewPathError", "UnknownViewError",
     "list_tree", "stat_path", "read_file_bytes",
+    # 离线关系加工子系统
+    "run_plan", "open_result_store", "RunOutcome", "RelationalStore",
+    "PlanError", "SourceReadError",
 ]

@@ -31,12 +31,24 @@ oci_catalog/fileview/  # 镜像层文件视图：离线合成镜像最终文件�
     ├── fileview_queries.py# 列树 / 路径溯源 / 取文件原始字节
     ├── fileview_cli.py    # 构建与查询入口（python3 -m ...）
     └── sample_layers.py   # 可重建的多层归档演示样例
-tests/                 # 184 个 unittest 用例（无第三方依赖）
+oci_catalog/relational/ # 离线关系加工：声明式计划 -> 业务结果 + 逐行血缘（独立 SQLite 库）
+    ├── contract.py          # 字段契约、严格类型/定点十进制、单记录校验
+    ├── sources.py           # 只读视图取字节、CSV/JSONL 解析、物理行定位
+    ├── expression.py        # 受限过滤表达（手写分析器、三值逻辑、无 eval）
+    ├── plan.py              # 计划全量校验（重名/未知引用/循环/顺序无关拓扑）
+    ├── engine.py            # 选列/过滤/连接/分组执行与血缘多重集
+    ├── store.py             # 单事务原子落库、新进程查询/追溯/CSV 导出
+    ├── relational_cli.py    # 命令行入口（python3 -m ...）
+    ├── sample_relational.py # 可重建的关系加工演示数据与计划
+    └── README.md            # 计划格式与运行方式详述
+tests/                 # 265 个 unittest 用例（无第三方依赖）
 smoke_demo.py          # 目录采集端到端冒烟演示
 run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
 verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
 run_fileview_demo.py   # 文件视图全流程演示（多层归档 + 新进程验收）
 verify_fileview_demo.py# 被 run_fileview_demo 以新进程启动的验收脚本
+run_relational_demo.py # 关系加工全流程演示（声明式计划 + 新进程手写验收）
+verify_relational_demo.py # 被 run_relational_demo 以新进程启动的验收脚本
 ```
 
 ## 核心语义
@@ -102,7 +114,7 @@ sha256 比对；不符立即抛 `DigestMismatch`。采集器在 **repository 单
 ## 运行
 
 ```bash
-# 全部测试（184 个，纯标准库）
+# 全部测试（265 个，纯标准库）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 端到端演示（鉴权 + 多平台 + 改指向/删除 + 三类查询）
@@ -185,7 +197,7 @@ python3 -I smoke_demo.py
 ### 运行
 
 ```bash
-# 全部测试（184 个，纯标准库；含目录采集回归）
+# 全部测试（265 个，纯标准库；含目录采集回归）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # SBOM 端到端演示：关联供应商清单 + 新进程显式验收（期待集合/路径手写列出）
@@ -253,7 +265,7 @@ SBOM 库与视图库互不混写。
 | `layers` / `failures` | 查看构建层序 / 失败诊断 |
 
 ```bash
-# 全部测试（184 个，纯标准库；含目录采集与 SBOM 回归）
+# 全部测试（265 个，纯标准库；含目录采集与 SBOM 回归）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 文件视图端到端演示：两平台目录 + 三层归档合成 + 新进程手写验收
@@ -267,6 +279,60 @@ python3 -m oci_catalog.fileview.fileview_cli --catalog ... --views ... \
     list --image sha256:aaaa... --prefix /data
 python3 -m oci_catalog.fileview.fileview_cli --catalog ... --views ... \
     cat --image sha256:aaaa... --path /data/bin/blob.bin > blob.bin
+```
+
+## 离线关系加工（`oci_catalog.relational`）
+
+在文件视图之上，把镜像里的离线数据文件（按日期分区的订单 CSV、逐行
+JSON 客户归属、一对多费用表）接成可查询的关系结果。交付人员提交一份
+**声明式计划**（数据文件 + 字段契约 + 加工步骤），即可得到订单明细、
+客户汇总等业务结果，并对任意结果行逐行追溯来源记录与贡献次数。
+计划格式与完整语义见 `oci_catalog/relational/README.md`。
+
+### 边界与确定性
+
+* **不执行任意 Python/SQL**：过滤条件是受限表达语言（手写词法/语法
+  分析 + 三值逻辑，无 `eval`、无字符串拼执行），列引用与常量类型在
+  执行前全部校验；
+* **只读输入**：文件字节只经文件视图 `read_file_bytes` 获取，不访问
+  registry、不把镜像路径当宿主路径打开；目录库/视图库以 `mode=ro`
+  打开；输出库若指向任一输入库，写入前拒绝；
+* **定点十进制**：`decimal` 不经二进制浮点、不截断，`0.10+0.20=0.30`，
+  存储与导出保留字面量；
+* **两级失败语义**：单记录不合约进拒绝明细（带原始值/文件/记录序号/
+  物理行/原因），其它记录继续；文件不存在、编码损坏、CSV 结构损坏、
+  计划不合法则拒绝整次加工；
+* **顺序无关**：节点先全量校验（重名、未知引用、循环依赖指出具体
+  节点），再按依赖拓扑执行，打乱节点顺序结果不变；
+* **连接/分组规则**：空键不彼此匹配、重复键保留全部匹配组合、左连接
+  空侧补 null 且不虚构来源；NULL 自成一组，空输入产出零个分组；
+* **原子落库**：整份计划的所有节点/源记录/血缘/拒绝在单事务提交，
+  中途出错回滚，不可能查到只含部分节点的“成功” run。
+
+### 血缘与可追溯
+
+源记录保存 image digest、文件路径、记录序号与物理起始/结束行
+（CSV 跨行记录的序号与物理行号分别记录）。选列/过滤保持血缘，连接
+合并真实配对的两侧来源，分组只合并真正入组的行；同一源记录经一对多
+连接参与多条结果时贡献次数累加。追溯按“结果节点 + 持久化结果行 ID”
+返回去重、稳定排序的源记录及原始字段值，行 ID 在新进程中依然有效。
+
+### 运行
+
+```bash
+# 全部测试（265 个，纯标准库；含目录采集/SBOM/文件视图回归）
+python3 -I -m unittest discover -s tests -p 'test_*.py' -v
+
+# 关系加工端到端演示（含新进程手写期待值验收）
+python3 -I run_relational_demo.py
+
+# 命令行入口
+python3 -m oci_catalog.relational.relational_cli run \
+    --plan plan.json --output results.db --views views.db --catalog catalog.db
+python3 -m oci_catalog.relational.relational_cli --output results.db \
+    trace --run 1 --node region_summary --row-id 32
+python3 -m oci_catalog.relational.relational_cli --output results.db \
+    export --run 1 --node region_summary > summary.csv
 ```
 
 ## 设计取舍
