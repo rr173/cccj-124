@@ -51,7 +51,14 @@ oci_catalog/provenance/ # 离线构建证明：DSSE 信封 + in-toto/SLSA 声明
     ├── provenance_cli.py    # 命令行入口（python3 -m ...）
     ├── sample_data.py       # 可重建的三对测试密钥/信封/策略样例
     └── README.md            # 字段边界、策略例子、失败与未信任的区别、限制
-tests/                 # 359 个 unittest 用例（目录/SBOM/文件视图/关系为纯标准库；证明子系统需 cryptography）
+oci_catalog/vuln/      # 离线公告关联：本地 OSV 风格公告 × 已导入 SBOM 的版本判定（只读输入）
+    ├── versions.py          # PEP 440（packaging）/ 严格 SemVer（semantic_version）与 OSV 区间校验求值
+    ├── advisory.py          # 公告目录读取、结构校验、编号等价组（传递闭包）
+    ├── correlate.py         # 只读关联引擎：逐出现项判定、报告与按编号查询
+    ├── vuln_cli.py          # 命令行入口（python3 -m ...）
+    ├── sample_data.py       # 可重建的两平台 SBOM + 人工公告样例
+    └── README.md            # 本次接受的公告子集、区间语义、状态机与限制
+tests/                 # 454 个 unittest 用例（目录/SBOM/文件视图/关系为纯标准库；证明子系统需 cryptography，公告关联需 packaging+semantic_version）
 smoke_demo.py          # 目录采集端到端冒烟演示
 run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
 verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
@@ -61,7 +68,24 @@ run_relational_demo.py # 关系加工全流程演示（声明式计划 + 新进�
 verify_relational_demo.py # 被 run_relational_demo 以新进程启动的验收脚本
 run_provenance_demo.py # 构建证明全流程演示（导入/换策略/新进程验收）
 verify_provenance_demo.py # 被 run_provenance_demo 以新进程启动的验收脚本
+run_vuln_demo.py       # 公告关联全流程演示（命令行报告 + 另一进程按别名查询 + 新进程验收）
+verify_vuln_demo.py    # 被 run_vuln_demo 以新进程启动的验收脚本（期待值手写为常量表）
 ```
+
+## 依赖安装
+
+目录采集、SBOM、文件视图、关系加工四个子系统为**纯标准库**；两个子系统
+各有一个第三方依赖（函数内延迟导入，缺失时其余功能与 `import oci_catalog`
+不受影响，对应测试自动跳过）：
+
+```bash
+pip install cryptography                # 仅 provenance 子系统需要
+pip install packaging semantic_version  # 仅 vuln 子系统需要
+```
+
+本仓库根目录的 `.venv/` 已按上述方式备好（`python3 -m venv .venv
+--without-pip` 后把纯 Python wheel 解包进其 site-packages），下文用
+`.venv/bin/python` 表示装好依赖的解释器。
 
 ## 核心语义
 
@@ -126,7 +150,7 @@ sha256 比对；不符立即抛 `DigestMismatch`。采集器在 **repository 单
 ## 运行
 
 ```bash
-# 全部测试（359 个；目录采集纯标准库，证明子系统需 cryptography）
+# 全部测试（454 个；目录采集纯标准库，证明子系统需 cryptography，公告关联需 packaging+semantic_version）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 端到端演示（鉴权 + 多平台 + 改指向/删除 + 三类查询）
@@ -209,7 +233,7 @@ python3 -I smoke_demo.py
 ### 运行
 
 ```bash
-# 全部测试（359 个；含目录采集回归，证明子系统需 cryptography）
+# 全部测试（454 个；含目录采集回归，依赖缺失时对应子系统用例自动跳过）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # SBOM 端到端演示：关联供应商清单 + 新进程显式验收（期待集合/路径手写列出）
@@ -277,7 +301,7 @@ SBOM 库与视图库互不混写。
 | `layers` / `failures` | 查看构建层序 / 失败诊断 |
 
 ```bash
-# 全部测试（359 个；含目录采集与 SBOM 回归，证明子系统需 cryptography）
+# 全部测试（454 个；含目录采集与 SBOM 回归，依赖缺失时对应子系统用例自动跳过）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 文件视图端到端演示：两平台目录 + 三层归档合成 + 新进程手写验收
@@ -332,7 +356,7 @@ JSON 客户归属、一对多费用表）接成可查询的关系结果。交付
 ### 运行
 
 ```bash
-# 全部测试（359 个；含目录采集/SBOM/文件视图回归，证明子系统需 cryptography）
+# 全部测试（454 个；含目录采集/SBOM/文件视图回归，依赖缺失时对应子系统用例自动跳过）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 关系加工端到端演示（含新进程手写期待值验收）
@@ -380,7 +404,7 @@ python3 -m oci_catalog.relational.relational_cli --output results.db \
 ### 运行
 
 ```bash
-# 全部测试（359 个；证明子系统需要 cryptography，缺失时其用例自动跳过）
+# 全部测试（454 个；证明子系统需要 cryptography，缺失时其用例自动跳过）
 .venv/bin/python -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 构建证明端到端演示：三对测试密钥 + 换策略重评价 + 新进程手写验收
@@ -397,6 +421,61 @@ python3 -m oci_catalog.provenance.provenance_cli image \\
 python3 -m oci_catalog.provenance.provenance_cli material \\
     --catalog ... --prov ... --policy policy.json \\
     --uri https://mirror.example/dataset.tar.gz --sha256 <64hex>
+```
+
+## 离线公告关联（`oci_catalog.vuln`）
+
+交付人员把安全团队下载的漏洞公告（本地 OSV 风格目录）逐条对照已导入的
+SBOM 库：公告只写“从哪个版本引入、在哪个版本修好”，本作业负责加工
+公告中的**受影响版本集合**并与现有安装坐标关联，为指定镜像生成逐组件
+出现项的版本判定报告。**不重新导入 SBOM、不访问在线漏洞库、不做运行时
+漏洞检测、不判断代码路径能否触发漏洞**；公告目录与 SBOM/目录库只读，
+唯一输出是 JSON 报告。公告子集、区间语义与状态机的完整定义见
+`oci_catalog/vuln/README.md`。
+
+### 语义要点
+
+* **版本判定**：PyPI 用 `packaging.version.Version`（PEP 440），npm 用
+  `semantic_version.Version`（严格 SemVer，缺段拒绝、预发行数字段按数字
+  比较、构建元数据不影响区间先后）；不转浮点、不按文本排序、不补写版本
+  段；只支持 PyPI 的 `ECOSYSTEM` 与 npm 的 `SEMVER` 区间，其他生态与
+  区间类型保留为无法判断；
+* **events 按原列表解释**：`introduced` 含下界（`"0"` 表示从所有版本
+  之前开始）、`fixed`/`limit` 排除端点、`last_affected` 包含端点、可
+  再次引入、未结束区间延伸到未来；倒退/重叠/不交替/端点不可解析都定位
+  文件与字段并使整次作业失败，不跳过坏公告；
+* **编号等价组**：`id`+`aliases` 的无向传递闭包（允许环、允许指向无
+  文件的编号），组内字典序最小编号为稳定展示名；`related` 不并组；
+  撤回公告不贡献范围但别名仍作编号解释，撤回不传染同组有效公告；别名
+  只合并展示，不把甲公告的范围套给乙公告的包；
+* **逐出现项展示**：同一组件在两份清单中出现就是两条记录（不合并成
+  一条库存）；同一漏洞的多个编号并为一组（不报成几个漏洞）；每条保留
+  镜像 digest、平台、清单来源、文件内引用、原 purl 与命中依据（公告
+  id、affected 下标、区间位置）；qualifiers 原样带回；
+* **状态机**：`affected` / `unknown` / `not_affected_in_feed` /
+  `uncovered`；缺 purl、不支持生态、缺安装版本一律 `unknown` 而非
+  安全；未知与确定不命中不混用；已知命中不被其他未知声明抹掉；没有
+  SBOM 的镜像单独说明（退出码 3），不给出“零漏洞”成功结论；没有
+  找到命中只代表这批输入的覆盖情况，不代表镜像没有漏洞。
+
+### 运行
+
+```bash
+# 全部测试（454 个；公告关联子系统需要 packaging 与 semantic_version，
+# 缺失时其用例自动跳过）
+.venv/bin/python -I -m unittest discover -s tests -p 'test_*.py' -v
+
+# 公告关联端到端演示：两平台 SBOM + 人工公告 + 命令行报告 +
+# 另一进程按别名查询 + 手写期待表验收
+.venv/bin/python -I run_vuln_demo.py
+
+# 命令行入口
+python3 -m oci_catalog.vuln.vuln_cli report \\
+    --catalog catalog.db --sbom sbom.db --advisories ./advisories \\
+    --digest sha256:aaaa... [--output report.json]
+python3 -m oci_catalog.vuln.vuln_cli advisory \\
+    --catalog ... --sbom ... --advisories ... \\
+    --digest sha256:aaaa... --id VULN-CCCC
 ```
 
 ## 设计取舍

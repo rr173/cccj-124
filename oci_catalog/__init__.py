@@ -77,6 +77,19 @@ from .provenance import (
     query_image_provenance,
     query_material_images,
 )
+from .vuln import (
+    AFFECTED,
+    NOT_AFFECTED,
+    UNCOVERED,
+    UNKNOWN,
+    AdvisoryError,
+    AdvisorySet,
+    NoSBOMError,
+    UnknownAdvisoryId,
+    build_report,
+    load_advisory_dir,
+    query_advisory,
+)
 
 __all__ = [
     "RegistryClient", "Collector", "CatalogStore",
@@ -104,4 +117,8 @@ __all__ = [
     "ProvenanceStore", "ProvenanceImportResult", "Policy", "PolicyError",
     "load_policy", "key_fingerprint", "evaluate_evidence", "Evaluation",
     "query_image_provenance", "query_material_images",
+    # 离线公告关联子系统
+    "AdvisoryError", "AdvisorySet", "load_advisory_dir",
+    "AFFECTED", "NOT_AFFECTED", "UNCOVERED", "UNKNOWN",
+    "NoSBOMError", "UnknownAdvisoryId", "build_report", "query_advisory",
 ]

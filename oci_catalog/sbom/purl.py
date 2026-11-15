@@ -66,13 +66,21 @@ def _encode_namespace(namespace: str) -> str:
     return "/".join(_encode_segment(part) for part in namespace.split("/"))
 
 
-def _encode_subpath(subpath: str) -> str:
-    # subpath 同样按 '/' 分段；"." 与 ".." 段在语义上无意义，视为非法
-    parts = subpath.split("/")
-    for part in parts:
+def _validate_subpath(decoded: str) -> None:
+    # subpath 的 "." 与 ".." 段在语义上无意义，视为非法（在解码后的原文上判定）
+    for part in decoded.split("/"):
         if part in (".", "..", ""):
-            raise PurlError(f"purl subpath 含非法段: {subpath!r}")
-    return "/".join(_encode_segment(part) for part in parts)
+            raise PurlError(f"purl subpath 含非法段: {decoded!r}")
+
+
+def _encode_subpath(subpath: str) -> str:
+    # subpath 同样按 '/' 分段编码，分隔符本身保留
+    return "/".join(_encode_segment(part) for part in subpath.split("/"))
+
+
+def normalize_pypi_name(name: str) -> str:
+    """PyPI 名称的 PEP 503 归一：连字符/下划线/点的连续组合 → 单个连字符并转小写。"""
+    return _PYPI_NORMALIZE_RE.sub("-", name).lower()
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,7 @@ class Purl:
     type: str
     name: str
     namespace: tuple[str, ...] = ()
+    # version 与 subpath 保存解码后的原文；canonical 输出时统一规范编码
     version: str | None = None
     # qualifiers 保持为已排序的 (key, value) 元组序列，值为解码后的原文
     qualifiers: tuple[tuple[str, str], ...] = ()
@@ -124,11 +133,13 @@ def parse_purl(raw: str) -> Purl:
     remainder = raw[len("pkg:"):]
 
     # 1. 依次切出 subpath（#）、qualifiers（?）、version（@，最后一个 @）
+    #    各段统一保存**解码后的原文**，canonical 输出时才做规范编码（一次），
+    #    保证 parse(canonical) 往返稳定（version/subpath 曾双重编码，已修正）。
     subpath: str | None = None
     if "#" in remainder:
         remainder, _, subpath_raw = remainder.partition("#")
-        subpath_decoded = _decode_verified(subpath_raw, "purl subpath")
-        subpath = _encode_subpath(subpath_decoded)
+        subpath = _decode_verified(subpath_raw, "purl subpath")
+        _validate_subpath(subpath)
 
     qualifiers_raw: str | None = None
     if "?" in remainder:
@@ -138,7 +149,7 @@ def parse_purl(raw: str) -> Purl:
     if "@" in remainder:
         # namespace/name 段内不允许出现未编码的 @，取最后一个切分点即可
         remainder, _, version_raw = remainder.rpartition("@")
-        version = _encode_segment(_decode_verified(version_raw, "purl version"))
+        version = _decode_verified(version_raw, "purl version")
 
     # 2. type 与 path
     if "/" not in remainder:
@@ -184,7 +195,7 @@ def parse_purl(raw: str) -> Purl:
 
     # 5. 类型相关的名称归一化
     if ptype == "pypi":
-        name = _PYPI_NORMALIZE_RE.sub("-", name).lower()
+        name = normalize_pypi_name(name)
         namespace = tuple(ns.lower() for ns in namespace)
     elif ptype == "npm":
         # npm scope（@scope/name 中的 scope）按规则必须小写；包名本体保留大小写

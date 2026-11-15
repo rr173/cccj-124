@@ -56,6 +56,21 @@ class TestPurlParsing(unittest.TestCase):
         self.assertEqual(purl.name, "pkg name")
         self.assertEqual(purl.canonical, "pkg:npm/%40scope/pkg%20name@1")
 
+    def test_version_with_special_chars_roundtrips(self):
+        # npm 构建元数据 '+'：version 保存解码后原文，canonical 只编码一次，
+        # parse(canonical) 往返必须稳定（历史双重编码缺陷的回归测试）
+        purl = parse_purl("pkg:npm/%40acme/gadget@1.4.0%2Bbuild.7")
+        self.assertEqual(purl.version, "1.4.0+build.7")
+        self.assertEqual(
+            purl.canonical, "pkg:npm/%40acme/gadget@1.4.0%2Bbuild.7")
+        self.assertEqual(parse_purl(purl.canonical), purl)
+
+    def test_subpath_with_special_chars_roundtrips(self):
+        purl = parse_purl("pkg:generic/x@1#lib/a%20b")
+        self.assertEqual(purl.subpath, "lib/a b")
+        self.assertEqual(purl.canonical, "pkg:generic/x@1#lib/a%20b")
+        self.assertEqual(parse_purl(purl.canonical), purl)
+
     def test_qualifier_order_and_percent_encoding_normalized(self):
         a = parse_purl("pkg:generic/openssl@3?arch=x86_64&distro=debian")
         b = parse_purl("pkg:generic/openssl@3?distro=debian&arch=x86_64")
