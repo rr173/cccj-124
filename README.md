@@ -66,7 +66,16 @@ oci_catalog/blobstore/ # 本机共享 OCI 原始对象仓：闭包导入、命�
     ├── blobstore_cli.py     # 命令行入口（python3 -m ...）
     ├── sample_data.py       # 可重建的真实字节 OCI Image Layout 样例
     └── README.md            # 存储布局、引用/读取生命周期、回收清单、异常退出恢复
-tests/                 # unittest 用例（目录/SBOM/文件视图/关系/对象仓为纯标准库；证明子系统需 cryptography，公告关联需 packaging+semantic_version）
+oci_catalog/pusher/    # OCI 镜像交付发布器：保留名称选中的镜像送达远端仓库（可中断后继续）
+    ├── errors.py            # 异常分类（待继续/不可继续可区分）
+    ├── progress.py          # 进度文件：六元组绑定、状态机、原子落盘
+    ├── client.py            # 发布侧 HTTP 客户端（子集、同源纪律、有限重试）
+    ├── receiver.py          # 接收端 HTTP 服务（演示/测试用，保存字节与请求记录）
+    ├── pusher.py            # 发布编排：固定读者、对账恢复、依赖序、标签安全
+    ├── pusher_cli.py        # 命令行入口（python3 -m ...）
+    ├── sample_data.py       # 可重建演示数据（嵌套索引/共享层/非UTF-8/零字节）
+    └── README.md            # HTTP 子集、进度与源保护有效期、失败后继续方式
+tests/                 # unittest 用例（目录/SBOM/文件视图/关系/对象仓/发布器为纯标准库；证明子系统需 cryptography，公告关联需 packaging+semantic_version）
 smoke_demo.py          # 目录采集端到端冒烟演示
 run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
 verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
@@ -80,6 +89,8 @@ run_vuln_demo.py       # 公告关联全流程演示（命令行报告 + 另一�
 verify_vuln_demo.py    # 被 run_vuln_demo 以新进程启动的验收脚本（期待值手写为常量表）
 run_blobstore_demo.py  # OCI 原始对象仓全流程演示（真实字节布局 + 腾盘/并发/崩溃恢复）
 verify_blobstore_demo.py # 被 run_blobstore_demo 以新进程启动的验收脚本（人工常量表）
+run_pusher_demo.py     # 交付发布全流程演示（真实跨进程 HTTP + 故障注入 + 中断恢复）
+verify_pusher_demo.py  # 被 run_pusher_demo 以新进程启动的验收脚本（夹具常量逐字节核对）
 ```
 
 ## 依赖安装
@@ -542,6 +553,52 @@ python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs \
 python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs gc plan
 python3 -m oci_catalog.blobstore.blobstore_cli --store /srv/blobs \
     gc apply --plan <plan_id>
+```
+
+## OCI 镜像交付发布器（`oci_catalog.pusher`）
+
+执行节点要从机房镜像服务拉取下一批作业，交付人员手里只有本机对象仓
+中的保留名称。本子系统把名称选中的镜像**真正送到远端仓库**：从
+blobstore 固定读者上下文取原字节，经受支持的 OCI Distribution 子集
+推送，最后更新交付标签。命令可中断后继续——运维人员第二次带上同一
+进度文件即可。只读使用对象仓与其他既有库，不扩展它们的查询/加工
+能力。详见 `oci_catalog/pusher/README.md`。
+
+### 语义要点
+
+* **原样交付**：config/layer 保持原字节（不解包、不重压缩），清单以
+  原内容类型和原字节 PUT（不重新序列化）；支持 OCI 单平台清单与
+  可嵌套的多平台索引，子清单先于引用它的父索引发布；
+* **去重与复用**：共享对象按 digest 只向同一目标仓库交付一次；
+  已有远端对象经 HEAD 核对后复用；
+* **固定根**：一次运行交付 `open_reader` 固定的根，本机名称中途被
+  更新不会混入另一份镜像；跨进程恢复时名称不再指向该根或字节已
+  不可读，明确拒绝（不悄悄换根）；
+* **进度绑定**：进度文件绑定（源仓、保留名称、精确根、目标端点、
+  仓库路径、交付标签）；继续时参数冲突在发送写请求前拒绝；进度
+  损坏拒绝覆盖；
+* **对账恢复**：进度落盘与远端接受不是一个事务——本地记录不直接
+  代表远端事实。恢复时先 HEAD/GET 核对服务端实际状态，以服务端
+  确认的前缀继续；完成回执丢失先查对象是否已存在，不反复重传；
+* **标签安全**：全部 blob 与清单就绪后才更新交付标签；此前任何
+  失败都不改动标签原有指向；
+* **有界**：大层读取、HTTP 发送、恢复定位均有上界，对象字节不进
+  进度文件。
+
+### 运行
+
+```bash
+# 发布器回归（纯标准库，61 个用例）
+python3 -I -m unittest discover -s tests -p 'test_pusher_*.py' -v
+
+# 端到端演示：真实跨进程 HTTP 交付 + 故障注入 + 中断恢复 + 新进程验收
+python3 -I run_pusher_demo.py
+
+# 命令行入口（退出码：0 完成 / 5 待继续 / 2 不可继续）
+python3 -m oci_catalog.pusher.pusher_cli push \
+    --store /srv/blobs --name delivery-a \
+    --endpoint http://127.0.0.1:5000 --repo mirror/worker \
+    --tag release-7 --progress ./progress.json [--token TOKEN]
 ```
 
 ## 设计取舍
