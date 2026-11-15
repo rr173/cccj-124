@@ -45,6 +45,18 @@ from .sbom import (
     query_image_components,
 )
 from .store import CatalogStore
+from .fileview import (
+    BuildResult,
+    FileViewStore,
+    LayerIngestError,
+    TreeMerge,
+    ViewDiagnostic,
+    ViewPathError,
+    UnknownViewError,
+    list_tree,
+    read_file_bytes,
+    stat_path,
+)
 
 __all__ = [
     "RegistryClient", "Collector", "CatalogStore",
@@ -61,4 +73,8 @@ __all__ = [
     "Purl", "PurlError", "parse_purl", "Diagnostic", "ParsedDocument",
     "parse_document", "SBOMStore", "ImportResult",
     "query_image_components", "query_component_images",
+    # 镜像层文件视图子系统
+    "FileViewStore", "BuildResult", "TreeMerge", "LayerIngestError",
+    "ViewDiagnostic", "ViewPathError", "UnknownViewError",
+    "list_tree", "stat_path", "read_file_bytes",
 ]

@@ -25,10 +25,18 @@ oci_catalog/
     ├── sbom_queries.py    # 镜像导出 + 组件反查（菱形/环安全最短路径）
     ├── sbom_cli.py        # 批量导入/查询入口（python3 -m ...）
     └── sample_data.py     # 可重建的关联供应商清单样例
-tests/                 # 91 个 unittest 用例（无第三方依赖）
+oci_catalog/fileview/  # 镜像层文件视图：离线合成镜像最终文件树（独立 SQLite 库）
+    ├── layer_archive.py   # tar/tar+gzip 解析、路径安全、白标记/不透明目录、层序归并
+    ├── fileview_store.py  # 镜像绑定校验、单镜像事务构建、失败诊断
+    ├── fileview_queries.py# 列树 / 路径溯源 / 取文件原始字节
+    ├── fileview_cli.py    # 构建与查询入口（python3 -m ...）
+    └── sample_layers.py   # 可重建的多层归档演示样例
+tests/                 # 184 个 unittest 用例（无第三方依赖）
 smoke_demo.py          # 目录采集端到端冒烟演示
 run_sbom_demo.py       # SBOM 全流程演示（在独立子进程中做显式验收）
 verify_sbom_demo.py    # 被 run_sbom_demo 以新进程启动的验收脚本
+run_fileview_demo.py   # 文件视图全流程演示（多层归档 + 新进程验收）
+verify_fileview_demo.py# 被 run_fileview_demo 以新进程启动的验收脚本
 ```
 
 ## 核心语义
@@ -94,7 +102,7 @@ sha256 比对；不符立即抛 `DigestMismatch`。采集器在 **repository 单
 ## 运行
 
 ```bash
-# 全部测试（26 个，纯标准库）
+# 全部测试（184 个，纯标准库）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # 端到端演示（鉴权 + 多平台 + 改指向/删除 + 三类查询）
@@ -177,7 +185,7 @@ python3 -I smoke_demo.py
 ### 运行
 
 ```bash
-# 全部测试（91 个，纯标准库；含原 26 个目录采集回归）
+# 全部测试（184 个，纯标准库；含目录采集回归）
 python3 -I -m unittest discover -s tests -p 'test_*.py' -v
 
 # SBOM 端到端演示：关联供应商清单 + 新进程显式验收（期待集合/路径手写列出）
@@ -188,6 +196,77 @@ python3 -m oci_catalog.sbom.sbom_cli import --catalog catalog.db --sbom sbom.db 
     --bind vendor-a.cdx.json=sha256:aaaa... --bind vendor-b.spdx.json=sha256:bbbb...
 python3 -m oci_catalog.sbom.sbom_cli image    --catalog ... --sbom ... --digest sha256:...
 python3 -m oci_catalog.sbom.sbom_cli component --catalog ... --sbom ... --purl 'pkg:pypi/requests@2.32.3'
+```
+
+## 镜像层文件视图（`oci_catalog.fileview`）
+
+交付离线数据处理镜像时，需要取出镜像里**实际生效**的配置与数据字典；
+直接遍历每层压缩包会把旧版文件、已删除文件也取出来。本子系统按
+manifest 层序把各层归并成最终文件树，落独立 SQLite 视图库，之后可
+列目录、溯源路径来自哪一层、把选定普通文件的原始字节写到标准输出。
+**全程离线**：不拉取 registry，不执行镜像中的任何代码；目录库只读，
+SBOM 库与视图库互不混写。
+
+### 层接入边界
+
+* 支持未压缩 tar 与 gzip tar，**按目录库登记的 layer media type 解读**
+  （不嗅探）；zstd 等其他压缩格式以 `unsupported_layer_media` 拒绝。
+* 归档原始字节的 sha256 必须与 layer digest 一致（`digest_mismatch`）；
+  缺层映射（`missing_layer_archive`）、归档不可读、损坏归档、非法成员
+  路径、不可解析/成环硬链接，诊断都同时指出**镜像与层**，且整次构建
+  失败——不保存任何可供查询的成功视图，只在 `view_failures` 留诊断。
+* 绑定目标必须是目录中已收录的单平台 image manifest；tag、index
+  digest、未收录摘要分别拒绝。
+* 同一层被多个镜像引用时，每个镜像按自己的层序独立归并（视图与层序
+  逐镜像记录）；只有文件内容字节按 sha256 在视图库内去重。
+
+### 归并语义（overlay）
+
+* 后层普通文件替换前层同路径内容；目录 ↔ 非目录相互替换时，子树随
+  最终类型收敛。
+* `.wh.<name>` 删除低层条目（含子树），`.wh..wh..opq` 遮蔽低层该目录
+  全部内容；**只遮蔽低层**，同层内容保留，结果不取决于白标记在 tar
+  中的先后位置；白标记不作为业务文件导出。
+* 同一归档内归一后同路径的成员：**靠后者胜**，胜出成员的归档位置
+  （`member_index`）随条目保留。
+* 成员路径归一化：拒绝 `..`、绝对路径、空路径、非 UTF-8 名称，
+  绝不写到视图树之外。
+
+### 条目与链接
+
+* 区分普通文件 / 目录 / 符号链接 / 硬链接；每条保留最终路径、类型、
+  大小、模式、最近改变该路径的 layer digest 与 tar 成员名。
+* 符号链接只作为链接信息查询：列树与取文件都**不跟随**（穿越符号
+  链接的查询路径被明确拒绝，不可能读到宿主文件）。
+* 硬链接目标可在同层靠后的成员中，也可复用低层文件；归并时解析为
+  内容快照——后续层覆盖目标路径不影响已建立的链接。无法解析或成环
+  的硬链接明确拒绝。
+
+### 查询与入口
+
+| 函数 / 子命令 | 行为 |
+|---|---|
+| `list_tree` / `list --prefix` | 按目录前缀列树（路径段边界匹配，`/data` 不混 `/database`） |
+| `stat_path` / `stat --path` | 查看路径类型与来源层、tar 成员 |
+| `read_file_bytes` / `cat --path` | 普通文件/硬链接原始字节直写 stdout（不做文本重编码） |
+| `build --image --layer DIGEST=PATH` | 按 manifest 层序构建视图（失败退出码 2） |
+| `layers` / `failures` | 查看构建层序 / 失败诊断 |
+
+```bash
+# 全部测试（184 个，纯标准库；含目录采集与 SBOM 回归）
+python3 -I -m unittest discover -s tests -p 'test_*.py' -v
+
+# 文件视图端到端演示：两平台目录 + 三层归档合成 + 新进程手写验收
+python3 -I run_fileview_demo.py
+
+# 命令行入口
+python3 -m oci_catalog.fileview.fileview_cli --catalog catalog.db \
+    --views views.db build --image sha256:aaaa... \
+    --layer sha256:1111...=/layers/l1.tar.gz --layer sha256:2222...=/layers/l2.tar
+python3 -m oci_catalog.fileview.fileview_cli --catalog ... --views ... \
+    list --image sha256:aaaa... --prefix /data
+python3 -m oci_catalog.fileview.fileview_cli --catalog ... --views ... \
+    cat --image sha256:aaaa... --path /data/bin/blob.bin > blob.bin
 ```
 
 ## 设计取舍
